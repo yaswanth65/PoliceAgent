@@ -6,8 +6,11 @@ class PoliceAIReceptionist {
         this.isRecording = false;
         this.recordingStartTime = null;
         this.recordingTimer = null;
-        
+        this.audioContext = null;
+        this.isPlaying = false;  // Added audio state tracking
+        this.currentAudio = null;  // Track current audio
         this.initializeElements();
+        this.initializeAudioContext();
         this.initializeSession();
         this.requestMicrophonePermission();
     }
@@ -24,31 +27,38 @@ class PoliceAIReceptionist {
         this.callerEmail = document.getElementById('callerEmail');
         this.endCallBtn = document.getElementById('endCallBtn');
         this.loading = document.getElementById('loading');
-        
+
         // Event listeners
         this.recordBtn.addEventListener('click', () => this.toggleRecording());
         this.endCallBtn.addEventListener('click', () => this.endSession());
     }
 
+    async initializeAudioContext() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            console.log('Audio context initialized');
+        } catch (error) {
+            console.warn('Could not initialize audio context:', error);
+        }
+    }
+
     async requestMicrophonePermission() {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ 
+            const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
                     sampleRate: 44100
-                } 
+                }
             });
-            
-            this.updateStatus('Microphone ready - Click to start recording', 'success');
+            this.updateStatus('🎤 Ready to take your call - Click to speak', 'success');
             this.recordBtn.disabled = false;
-            
+
             // Stop the stream for now
             stream.getTracks().forEach(track => track.stop());
-            
         } catch (error) {
             console.error('Microphone permission denied:', error);
-            this.updateStatus('Microphone access denied. Please enable microphone permissions.', 'error');
+            this.updateStatus('❌ Microphone access denied. Please enable microphone permissions.', 'error');
         }
     }
 
@@ -60,7 +70,7 @@ class PoliceAIReceptionist {
                     'Content-Type': 'application/json',
                 }
             });
-            
+
             if (response.ok) {
                 const data = await response.json();
                 this.sessionId = data.session_id;
@@ -70,7 +80,7 @@ class PoliceAIReceptionist {
             }
         } catch (error) {
             console.error('Session initialization failed:', error);
-            this.updateStatus('Failed to initialize session. Please refresh the page.', 'error');
+            this.updateStatus('❌ Failed to connect. Please refresh the page.', 'error');
         }
     }
 
@@ -83,36 +93,48 @@ class PoliceAIReceptionist {
     }
 
     async startRecording() {
+        // Don't allow recording while audio is playing
+        if (this.isPlaying) {
+            this.updateStatus('⏳ Please wait for the officer to finish speaking...', 'warning');
+            return;
+        }
+
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 44100
+                }
+            });
+
             this.mediaRecorder = new MediaRecorder(stream, {
                 mimeType: 'audio/webm;codecs=opus'
             });
-            
+
             this.audioChunks = [];
             this.isRecording = true;
             this.recordingStartTime = Date.now();
-            
+
             this.mediaRecorder.ondataavailable = (event) => {
                 if (event.data.size > 0) {
                     this.audioChunks.push(event.data);
                 }
             };
-            
+
             this.mediaRecorder.onstop = () => {
                 this.processRecording();
             };
-            
+
             this.mediaRecorder.start();
             this.updateRecordingUI(true);
             this.startRecordingTimer();
-            
-            this.updateStatus('Recording... Speak clearly about your police-related inquiry', 'recording');
-            
+            this.updateStatus('🔴 Recording... Please speak clearly', 'recording');
+
         } catch (error) {
             console.error('Failed to start recording:', error);
-            this.updateStatus('Failed to start recording. Please check microphone permissions.', 'error');
+            this.updateStatus('❌ Failed to start recording. Please check microphone permissions.', 'error');
         }
     }
 
@@ -120,15 +142,15 @@ class PoliceAIReceptionist {
         if (this.mediaRecorder && this.isRecording) {
             this.mediaRecorder.stop();
             this.isRecording = false;
-            
+
             // Stop all tracks
             if (this.mediaRecorder.stream) {
                 this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
             }
-            
+
             this.updateRecordingUI(false);
             this.stopRecordingTimer();
-            this.updateStatus('Processing your request...', 'processing');
+            this.updateStatus('🔄 Processing your request...', 'processing');
         }
     }
 
@@ -137,10 +159,12 @@ class PoliceAIReceptionist {
             this.recordBtn.classList.add('recording');
             this.recordIcon.textContent = '⏹️';
             this.recordText.textContent = 'Stop Recording';
+            this.recordBtn.style.backgroundColor = '#dc3545';
         } else {
             this.recordBtn.classList.remove('recording');
             this.recordIcon.textContent = '🎤';
             this.recordText.textContent = 'Start Recording';
+            this.recordBtn.style.backgroundColor = '#007bff';
         }
     }
 
@@ -149,7 +173,7 @@ class PoliceAIReceptionist {
             const elapsed = Date.now() - this.recordingStartTime;
             const minutes = Math.floor(elapsed / 60000);
             const seconds = Math.floor((elapsed % 60000) / 1000);
-            this.recordingTime.textContent = 
+            this.recordingTime.textContent =
                 `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
         }, 1000);
     }
@@ -164,12 +188,11 @@ class PoliceAIReceptionist {
 
     async processRecording() {
         if (this.audioChunks.length === 0) {
-            this.updateStatus('No audio recorded. Please try again.', 'error');
+            this.updateStatus('❌ No audio recorded. Please try again.', 'error');
             return;
         }
 
         this.showLoading(true);
-
         try {
             const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
             const formData = new FormData();
@@ -182,29 +205,31 @@ class PoliceAIReceptionist {
             });
 
             const data = await response.json();
+            console.log('API Response:', data); // Debug log
 
             if (response.ok) {
                 this.displayConversation(data.transcript, data.response);
-                
-                // Play audio response if available
-                if (data.audio_response) {
-                    this.playAudioResponse(data.audio_response);
+
+                // Play audio response if available - FIXED AUDIO PLAYBACK
+                if (data.has_audio && data.audio_response) {
+                    console.log('Audio response received, attempting to play...');
+                    await this.playAudioResponse(data.audio_response);
+                } else {
+                    console.log('No audio response available');
+                    this.updateStatus('✅ Ready for your next question', 'success');
                 }
-                
-                this.updateStatus('Ready for your next question', 'success');
-                
+
                 // Show caller info after first interaction
                 if (data.message_count === 1) {
                     this.callerInfo.style.display = 'block';
                 }
-                
             } else {
                 throw new Error(data.error || 'Processing failed');
             }
 
         } catch (error) {
             console.error('Processing error:', error);
-            this.updateStatus(`Error: ${error.message}`, 'error');
+            this.updateStatus(`❌ Error: ${error.message}`, 'error');
         } finally {
             this.showLoading(false);
         }
@@ -214,49 +239,147 @@ class PoliceAIReceptionist {
         // Add user message
         const userMessage = document.createElement('div');
         userMessage.className = 'message user-message';
-        userMessage.innerHTML = `<strong>You:</strong> ${transcript}`;
+        userMessage.innerHTML = `<strong>🗣️ You:</strong> ${transcript}`;
         this.conversation.appendChild(userMessage);
 
         // Add bot response
         const botMessage = document.createElement('div');
         botMessage.className = 'message bot-message';
-        botMessage.innerHTML = `<strong>Police Bot:</strong> ${response}`;
+        botMessage.innerHTML = `<strong>👮 Officer:</strong> ${response}`;
         this.conversation.appendChild(botMessage);
 
         // Scroll to bottom
         this.conversation.scrollTop = this.conversation.scrollHeight;
+
+        // Speak the bot's response using SpeechSynthesis API
+        if (response && typeof response === 'string') {
+            const utterance = new SpeechSynthesisUtterance(response);
+            speechSynthesis.speak(utterance);
+        }
+
+        // Add download link for bot audio if available
+        if (this.lastApiData && this.lastApiData.bot_audio_file) {
+            const audioLink = document.createElement('a');
+            audioLink.href = this.lastApiData.bot_audio_file;
+            audioLink.download = '';
+            audioLink.textContent = '⬇️ Download Officer Audio';
+            audioLink.className = 'bot-audio-download-link';
+            botMessage.appendChild(document.createElement('br'));
+            botMessage.appendChild(audioLink);
+        }
     }
 
-    playAudioResponse(audioHex) {
+    // COMPLETELY REWRITTEN AUDIO PLAYBACK FUNCTION
+    async playAudioResponse(audioBase64) {
         try {
-            // Convert hex string back to binary
-            const bytes = new Uint8Array(audioHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+            this.isPlaying = true;
+            this.updateStatus('🔊 Officer is speaking...', 'playing');
+            console.log('Starting audio playback...');
+
+            // Disable recording while playing
+            this.recordBtn.disabled = true;
+
+            // Stop any currently playing audio
+            if (this.currentAudio) {
+                this.currentAudio.pause();
+                this.currentAudio = null;
+            }
+
+            // Convert base64 to array buffer
+            const binaryString = atob(audioBase64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            console.log(`Audio data converted: ${bytes.length} bytes`);
+
+            // Create audio blob with proper MIME type
             const audioBlob = new Blob([bytes], { type: 'audio/mpeg' });
             const audioUrl = URL.createObjectURL(audioBlob);
-            
-            const audio = new Audio(audioUrl);
-            audio.play().catch(error => {
-                console.warn('Could not play audio response:', error);
-            });
-            
-            // Clean up URL after playing
-            audio.onended = () => URL.revokeObjectURL(audioUrl);
-            
+
+            // Create and configure audio element
+            this.currentAudio = new Audio(audioUrl);
+            this.currentAudio.volume = 0.9;
+            this.currentAudio.preload = 'auto';
+
+            // Set up event handlers
+            this.currentAudio.onloadstart = () => {
+                console.log('Audio loading started');
+            };
+
+            this.currentAudio.oncanplay = () => {
+                console.log('Audio can start playing');
+            };
+
+            this.currentAudio.onplay = () => {
+                console.log('Audio playback started successfully');
+            };
+
+            this.currentAudio.onended = () => {
+                console.log('Audio playback finished');
+                this.isPlaying = false;
+                this.recordBtn.disabled = false;
+                this.updateStatus('✅ Ready for your next question', 'success');
+                URL.revokeObjectURL(audioUrl);
+                this.currentAudio = null;
+            };
+
+            this.currentAudio.onerror = (error) => {
+                console.error('Audio playback error:', error);
+                console.error('Audio element error details:', this.currentAudio.error);
+                this.isPlaying = false;
+                this.recordBtn.disabled = false;
+                this.updateStatus('⚠️ Audio playback failed, but message received', 'warning');
+                URL.revokeObjectURL(audioUrl);
+                this.currentAudio = null;
+            };
+
+            this.currentAudio.onpause = () => {
+                console.log('Audio playback paused');
+            };
+
+            // Ensure audio context is resumed (required for some browsers)
+            if (this.audioContext && this.audioContext.state === 'suspended') {
+                await this.audioContext.resume();
+            }
+
+            // Start playback
+            console.log('Attempting to play audio...');
+            await this.currentAudio.play();
+
         } catch (error) {
-            console.warn('Could not play audio response:', error);
+            console.error('Audio playback failed:', error);
+            console.error('Error details:', error.message);
+            this.isPlaying = false;
+            this.recordBtn.disabled = false;
+            this.updateStatus('⚠️ Could not play audio response', 'warning');
+
+            // Clean up on error
+            if (this.currentAudio) {
+                const url = this.currentAudio.src;
+                this.currentAudio = null;
+                if (url.startsWith('blob:')) {
+                    URL.revokeObjectURL(url);
+                }
+            }
         }
     }
 
     async endSession() {
         const callerName = this.callerName.value.trim();
-        
         if (!callerName) {
             alert('Please enter your name before ending the session.');
             return;
         }
 
+        // Stop any playing audio
+        if (this.currentAudio) {
+            this.currentAudio.pause();
+            this.currentAudio = null;
+        }
+
         this.showLoading(true);
-        
         try {
             const response = await fetch('/end_session', {
                 method: 'POST',
@@ -274,7 +397,7 @@ class PoliceAIReceptionist {
 
             if (response.ok) {
                 this.displaySessionSummary(data.summary);
-                this.updateStatus('Session ended successfully. Thank you for using Police AI Receptionist.', 'success');
+                this.updateStatus('✅ Session ended. Thank you for calling Metro Police Department.', 'success');
                 this.recordBtn.disabled = true;
                 this.callerInfo.style.display = 'none';
             } else {
@@ -283,7 +406,7 @@ class PoliceAIReceptionist {
 
         } catch (error) {
             console.error('End session error:', error);
-            this.updateStatus(`Error ending session: ${error.message}`, 'error');
+            this.updateStatus(`❌ Error ending session: ${error.message}`, 'error');
         } finally {
             this.showLoading(false);
         }
@@ -291,15 +414,11 @@ class PoliceAIReceptionist {
 
     displaySessionSummary(summary) {
         const summaryMessage = document.createElement('div');
-        summaryMessage.className = 'message bot-message';
+        summaryMessage.className = 'message bot-message summary';
         summaryMessage.innerHTML = `
-            <strong>📋 Session Summary:</strong><br>
-            <div style="margin-top: 10px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;">
-                ${summary}
-            </div>
-            <p style="margin-top: 15px; font-size: 0.9em; color: #6c757d;">
-                This summary has been saved to our records. Thank you for using our service.
-            </p>
+            <strong>📋 Call Summary:</strong><br>
+            <div class="summary-content">${summary}</div>
+            <em>This summary has been saved to our records. Thank you for calling!</em>
         `;
         this.conversation.appendChild(summaryMessage);
         this.conversation.scrollTop = this.conversation.scrollHeight;
@@ -308,6 +427,7 @@ class PoliceAIReceptionist {
     updateStatus(message, type = '') {
         this.status.textContent = message;
         this.status.className = `status ${type}`;
+        console.log(`Status: ${message} (${type})`); // Debug log
     }
 
     showLoading(show) {
@@ -317,5 +437,6 @@ class PoliceAIReceptionist {
 
 // Initialize the application when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
+    console.log('Initializing Police AI Receptionist...');
     new PoliceAIReceptionist();
 });
