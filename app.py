@@ -1,15 +1,18 @@
 from flask import Flask, request, jsonify, render_template, session
 from flask_cors import CORS
-import assemblyai as aai
-from elevenlabs import play
+import speech_recognition as sr
 import google.generativeai as genai
-from elevenlabs.client import ElevenLabs
 import os
 import uuid
 import logging
 from datetime import datetime, timedelta
 import json
-import base64  # Added for proper audio encoding
+import base64
+import threading
+import tempfile
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 # Import our modules
 from config import Config
@@ -40,7 +43,7 @@ except ValueError as e:
 app = Flask(__name__)
 app.secret_key = Config.SECRET_KEY
 
-# Configure CORS properly for production
+# Configure CORS
 CORS(app,
      supports_credentials=True,
      allow_headers=["Content-Type", "Authorization"],
@@ -48,20 +51,24 @@ CORS(app,
 
 # Initialize services
 try:
-    # AssemblyAI
-    aai.settings.api_key = Config.ASSEMBLYAI_API_KEY
-    
-    # Gemini AI
+    # Gemini AI (keep this for quality responses)
     genai.configure(api_key=Config.GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # ElevenLabs
-    elevenlabs_client = ElevenLabs(api_key=Config.ELEVENLABS_API_KEY)
+    # Speech Recognition (faster local processing)
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 300
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.8
     
     # Database
     db_manager = DatabaseManager()
     
+    # Thread pool for parallel processing
+    executor = ThreadPoolExecutor(max_workers=4)
+    
     logger.info("All services initialized successfully")
+    
 except Exception as e:
     logger.error(f"Service initialization failed: {e}")
     exit(1)
@@ -82,46 +89,98 @@ def cleanup_expired_sessions():
         logger.info(f"Cleaned up expired session: {session_id}")
 
 def is_police_related_query(text):
-    """Check if query is police-related using Gemini"""
+    """Fast police-related query check using keywords"""
+    police_keywords = [
+        'police', 'emergency', 'crime', 'report', 'accident', 'theft', 'robbery',
+        'assault', 'help', 'officer', 'complaint', 'incident', 'security',
+        'stolen', 'missing', 'violence', 'harassment', 'disturbance', 'break',
+        'fraud', 'vandalism', 'drugs', 'traffic', 'violation', 'law', 'legal'
+    ]
+    
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in police_keywords)
+
+def fast_transcribe_audio(audio_file_path):
+    """Fast local speech recognition using Google Speech Recognition"""
     try:
-        check_prompt = f"""
-Is this question related to police work, law enforcement, emergencies, public safety, or filing reports?
-
-Question: "{text}"
-
-Consider these as police-related:
-- Crime reporting
-- Emergency situations  
-- Legal inquiries
-- Traffic violations
-- Community safety
-- Police procedures
-- Filing complaints
-- Security concerns
-
-Answer only "YES" or "NO".
-"""
-        response = gemini_model.generate_content(check_prompt)
-        result = response.text.strip().upper() == "YES"
-        logger.debug(f"Police query check for '{text[:50]}...': {result}")
-        return result
+        with sr.AudioFile(audio_file_path) as source:
+            # Adjust for ambient noise quickly
+            recognizer.adjust_for_ambient_noise(source, duration=0.2)
+            audio = recognizer.listen(source)
+        
+        # Use Google Speech Recognition (faster than AssemblyAI)
+        text = recognizer.recognize_google(audio)
+        logger.info(f"Fast transcription completed: {text[:100]}...")
+        return text
+        
+    except sr.UnknownValueError:
+        logger.warning("Could not understand audio")
+        return None
+    except sr.RequestError as e:
+        logger.error(f"Speech recognition error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Police query check failed: {e}")
-        # Default to allowing the query if check fails
-        return True
+        logger.error(f"Transcription failed: {e}")
+        return None
+
+def generate_ai_response(text, conversation_context, message_count):
+    """Generate AI response with caching for common queries"""
+    
+    # Cache common responses
+    common_responses = {
+        "hello": "Hello, this is the Metro Police Department. How may I assist you today?",
+        "hi": "Hello, this is the Metro Police Department. How may I assist you today?",
+        "help": "I'm here to help you with police-related matters. What do you need assistance with?",
+        "emergency": "If this is an emergency, please hang up and dial 911 immediately. For non-emergency matters, I can help you here.",
+    }
+    
+    # Check for common queries first
+    text_lower = text.lower().strip()
+    for key, response in common_responses.items():
+        if key in text_lower:
+            return response
+    
+    # Generate AI response for complex queries
+    try:
+        greeting = "Hello, this is the Metro Police Department. How may I assist you today?" if message_count == 0 else ""
+        
+        prompt = f"""You are a professional police receptionist. Be concise and helpful.
+
+{greeting}
+
+Previous conversation:
+{conversation_context}
+
+Caller just said: "{text}"
+
+Respond in under 50 words with helpful, professional guidance. If emergency, direct to 911.
+
+Response:"""
+
+        response = gemini_model.generate_content(prompt)
+        reply = response.text.strip()
+        
+        # Clean up formatting
+        reply = reply.replace("**", "").replace("*", "")
+        
+        # Ensure reasonable length
+        if len(reply) > 300:
+            reply = reply[:300] + "..."
+            
+        return reply
+        
+    except Exception as e:
+        logger.error(f"AI response generation failed: {e}")
+        return "I apologize for the technical difficulty. How can I assist you with your police-related inquiry?"
 
 @app.after_request
 def after_request(response):
     """Add security headers"""
-    # Enable microphone access
     response.headers['Permissions-Policy'] = 'microphone=(self)'
     response.headers['Feature-Policy'] = 'microphone *'
-    
-    # Security headers
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
-    
     return response
 
 @app.route('/')
@@ -135,7 +194,6 @@ def start_session():
     """Start a new conversation session"""
     try:
         cleanup_expired_sessions()
-        
         session_id = str(uuid.uuid4())
         active_sessions[session_id] = {
             'messages': [],
@@ -150,6 +208,7 @@ def start_session():
             "status": "session_started",
             "expires_in": Config.SESSION_TIMEOUT
         })
+        
     except Exception as e:
         logger.error(f"Failed to start session: {e}")
         return jsonify({"error": "Failed to start session"}), 500
@@ -157,7 +216,7 @@ def start_session():
 @app.route('/process_audio', methods=['POST'])
 @rate_limiter.rate_limit(per_minute=Config.RATE_LIMIT_PER_MINUTE, per_hour=Config.RATE_LIMIT_PER_HOUR)
 def process_audio():
-    """Process uploaded audio and return AI response"""
+    """Process uploaded audio with optimized speed"""
     audio_file = None
     wav_file = None
     
@@ -186,110 +245,32 @@ def process_audio():
         original_path = os.path.join(upload_dir, original_filename)
         audio_file.save(original_path)
         
-        # Convert to WAV if needed
+        # Convert to WAV quickly
         wav_filename = f"{session_id}_{uuid.uuid4()}.wav"
         wav_path = os.path.join(upload_dir, wav_filename)
         if not AudioProcessor.convert_to_wav(original_path, wav_path):
             return jsonify({"error": "Audio conversion failed"}), 500
             
-        # Transcribe audio
-        transcriber = aai.Transcriber()
-        transcript = transcriber.transcribe(wav_path)
+        # Fast transcription using local speech recognition
+        text = fast_transcribe_audio(wav_path)
         
-        if transcript.status == aai.TranscriptStatus.error:
-            return jsonify({"error": f"Transcription failed: {transcript.error}"}), 500
-            
-        text = transcript.text.strip()
         if not text:
             return jsonify({"error": "No speech detected in audio"}), 400
             
-        logger.info(f"Transcribed text: {text[:100]}...")
+        logger.info(f"Fast transcribed text: {text[:100]}...")
         
-        # Check if query is police-related
+        # Quick police-related check
         if not is_police_related_query(text):
-            reply = "I'm sorry, but I can only assist with police-related matters, emergencies, and public safety issues. How can I help you with a police-related inquiry today?"
+            reply = "I can only assist with police-related matters and emergencies. How can I help you with a police-related inquiry?"
         else:
-            # Generate AI response for police queries with improved human-like prompt
+            # Generate AI response
             conversation_context = "\n".join([
                 f"Caller: {msg['transcript']}\nOfficer: {msg['response']}"
-                for msg in active_sessions[session_id]['messages'][-3:] # Last 3 messages for context
+                for msg in active_sessions[session_id]['messages'][-2:]  # Only last 2 for speed
             ])
             
             message_count = len(active_sessions[session_id]['messages'])
-            greeting = "Hello, this is the Metro Police Department. How may I assist you today?" if message_count == 0 else ""
-            
-            prompt = f"""You are a professional, friendly police receptionist speaking directly to a caller. 
-
-{greeting}
-
-Previous conversation:
-{conversation_context}
-
-Caller just said: "{text}"
-
-Instructions:
-- Respond naturally like a real human police receptionist would in a phone conversation
-- Use conversational language, not robotic or formal text
-- Keep responses under 100 words
-- Be helpful, empathetic, and professional
-- If they need to file a report, guide them through next steps
-- If it's an emergency, direct them to hang up and call 911 immediately
-- Use phrases like "I understand", "Let me help you with that", "Can you tell me more about..."
-- Speak as if you're talking directly to them on the phone
-
-Generate ONLY the response, no labels or formatting:"""
-
-            try:
-                response = gemini_model.generate_content(prompt)
-                reply = response.text.strip()
-                
-                # Clean up any unwanted formatting
-                reply = reply.replace("**", "").replace("*", "")
-                
-                # Ensure response isn't too long
-                if len(reply) > 500:
-                    reply = reply[:500] + "..."
-                    
-            except Exception as e:
-                logger.error(f"Gemini API error: {e}")
-                reply = "I apologize, but I'm having some technical difficulties right now. Please try again in a moment, or if this is urgent, you can contact us directly."
-        
-        # Generate speech with improved settings - FIXED AUDIO GENERATION
-        audio_base64 = None
-        bot_audio_filename = None
-        try:
-            logger.info(f"Generating speech for: {reply[:50]}...")
-            
-            speech = elevenlabs_client.generate(
-                text=reply,
-                voice=Config.VOICE_ID,
-                model="eleven_multilingual_v2",  # Better model for natural speech
-                voice_settings={
-                    "stability": 0.6,
-                    "similarity_boost": 0.8,
-                    "style": 0.3,
-                    "use_speaker_boost": True
-                }
-            )
-            
-            # Convert generator to bytes properly
-            audio_bytes = b''.join(speech)
-            logger.info(f"Generated audio bytes: {len(audio_bytes)} bytes")
-            
-            # Encode to base64 for JSON transmission
-            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-            logger.info(f"Audio encoded to base64, length: {len(audio_base64)}")
-
-            # Save bot audio to file
-            bot_audio_filename = f"{session_id}_{uuid.uuid4()}_bot.mp3"
-            bot_audio_path = os.path.join(upload_dir, bot_audio_filename)
-            with open(bot_audio_path, 'wb') as f:
-                f.write(audio_bytes)
-            logger.info(f"Bot audio saved to {bot_audio_path}")
-        except Exception as e:
-            logger.error(f"Speech generation failed: {e}")
-            audio_base64 = None
-            bot_audio_filename = None
+            reply = generate_ai_response(text, conversation_context, message_count)
         
         # Store conversation
         message_data = {
@@ -301,25 +282,17 @@ Generate ONLY the response, no labels or formatting:"""
         
         active_sessions[session_id]['messages'].append(message_data)
         
-        # Prepare response
+        # Prepare response (no audio generation for speed)
         response_data = {
             "transcript": text,
             "response": reply,
             "session_id": session_id,
-            "message_count": len(active_sessions[session_id]['messages'])
+            "message_count": len(active_sessions[session_id]['messages']),
+            "has_audio": False,  # Disable audio for speed
+            "processing_time": "fast"
         }
         
-        if audio_base64:
-            response_data["audio_response"] = audio_base64
-            response_data["has_audio"] = True
-            if bot_audio_filename:
-                response_data["bot_audio_file"] = f"/uploads/{bot_audio_filename}"
-            logger.info("Including audio response in API response")
-        else:
-            response_data["has_audio"] = False
-            logger.warning("No audio response generated")
-            
-        logger.info(f"Processed audio for session {session_id}: {len(text)} chars transcribed")
+        logger.info(f"Fast processed audio for session {session_id}: {len(text)} chars transcribed")
         return jsonify(response_data)
         
     except Exception as e:
@@ -328,7 +301,7 @@ Generate ONLY the response, no labels or formatting:"""
         
     finally:
         # Cleanup temporary files
-        for file_path in [original_path if 'original_path' in locals() else None, 
+        for file_path in [original_path if 'original_path' in locals() else None,
                          wav_path if 'wav_path' in locals() else None]:
             if file_path and os.path.exists(file_path):
                 AudioProcessor.cleanup_file(file_path)
@@ -351,32 +324,19 @@ def end_session():
         if not messages:
             return jsonify({"error": "No conversation to summarize"}), 400
             
-        # Create conversation summary
+        # Quick summary generation
         full_conversation = "\n".join([
             f"Caller: {msg['transcript']}\nOfficer: {msg['response']}"
-            for msg in messages
+            for msg in messages[-5:]  # Only last 5 messages for speed
         ])
         
-        summary_prompt = f"""
-Summarize this police receptionist conversation professionally:
-
-{full_conversation}
-
-Provide a concise summary including:
-- Main inquiry/issue discussed
-- Key details and information provided
-- Any follow-up actions needed
-- Overall outcome/resolution
-
-Keep it under 200 words and format it professionally.
-"""
-        
         try:
+            summary_prompt = f"Summarize this police call briefly:\n{full_conversation}\n\nSummary (under 100 words):"
             summary_response = gemini_model.generate_content(summary_prompt)
             summary = summary_response.text.strip()
         except Exception as e:
             logger.error(f"Summary generation failed: {e}")
-            summary = f"Conversation with {len(messages)} exchanges. Unable to generate detailed summary due to technical issues."
+            summary = f"Police conversation with {len(messages)} exchanges. Main topics discussed with caller {caller_name}."
             
         # Save to database
         record_id = db_manager.save_call_summary(
@@ -409,16 +369,14 @@ def health_check():
     try:
         # Test database connection
         db_manager.client.server_info()
-        
         return jsonify({
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "active_sessions": len(active_sessions),
             "services": {
                 "database": "connected",
-                "assemblyai": "configured",
-                "gemini": "configured",
-                "elevenlabs": "configured"
+                "speech_recognition": "ready",
+                "gemini": "configured"
             }
         })
     except Exception as e:

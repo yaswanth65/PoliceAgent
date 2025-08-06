@@ -2,11 +2,11 @@ Flask==2.3.3
 Flask-CORS==4.0.0
 Flask-Limiter==3.5.0
 python-dotenv==1.0.0
-assemblyai==0.17.0
+SpeechRecognition==3.10.0
 google-generativeai==0.3.0
-elevenlabs>=0.2.0,<1.0.0
 pymongo==4.5.0
 pydub==0.25.1
 redis==5.0.0
 gunicorn==21.2.0
 Werkzeug==2.3.7
+pyaudio==0.2.11

@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Microphone and Voice Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .warning { background: #fff3cd; color: #856404; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        #log {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 Microphone and Voice Test</h1>
+    
+    <div class="test-section">
+        <h2>🎤 Microphone Test</h2>
+        <button onclick="testMicrophone()">Test Microphone Permission</button>
+        <button onclick="testRecording()">Test Recording</button>
+        <div id="micStatus" class="status info">Click to test microphone functionality</div>
+    </div>
+    
+    <div class="test-section">
+        <h2>🔊 Voice Synthesis Test</h2>
+        <button onclick="testVoice()">Test Voice Playback</button>
+        <button onclick="listVoices()">List Available Voices</button>
+        <div id="voiceStatus" class="status info">Click to test voice synthesis</div>
+    </div>
+    
+    <div class="test-section">
+        <h2>📝 Console Log</h2>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let audioStream = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${timestamp}] ${message}\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        async function testMicrophone() {
+            const statusDiv = document.getElementById('micStatus');
+            statusDiv.className = 'status warning';
+            statusDiv.textContent = 'Requesting microphone permission...';
+            
+            try {
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 16000,
+                        channelCount: 1
+                    }
+                });
+                
+                const tracks = audioStream.getTracks();
+                log(`Microphone permission granted. Found ${tracks.length} audio track(s)`);
+                
+                tracks.forEach((track, index) => {
+                    log(`Track ${index}: state=${track.readyState}, enabled=${track.enabled}, muted=${track.muted}`);
+                });
+                
+                statusDiv.className = 'status success';
+                statusDiv.textContent = '✅ Microphone working properly';
+                
+            } catch (error) {
+                log(`Microphone error: ${error.name} - ${error.message}`);
+                statusDiv.className = 'status error';
+                statusDiv.textContent = `❌ Microphone error: ${error.message}`;
+            }
+        }
+
+        async function testRecording() {
+            if (!audioStream) {
+                log('No audio stream available. Please test microphone first.');
+                return;
+            }
+            
+            const statusDiv = document.getElementById('micStatus');
+            statusDiv.className = 'status warning';
+            statusDiv.textContent = 'Testing recording...';
+            
+            try {
+                mediaRecorder = new MediaRecorder(audioStream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
+                
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                        log(`Audio chunk received: ${event.data.size} bytes`);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                    log(`Recording stopped. Total size: ${blob.size} bytes`);
+                    statusDiv.className = 'status success';
+                    statusDiv.textContent = '✅ Recording test completed successfully';
+                };
+                
+                mediaRecorder.onerror = (event) => {
+                    log(`Recording error: ${event.error}`);
+                    statusDiv.className = 'status error';
+                    statusDiv.textContent = '❌ Recording test failed';
+                };
+                
+                mediaRecorder.start();
+                log('Recording started...');
+                
+                // Stop recording after 3 seconds
+                setTimeout(() => {
+                    if (mediaRecorder && mediaRecorder.state === 'recording') {
+                        mediaRecorder.stop();
+                    }
+                }, 3000);
+                
+            } catch (error) {
+                log(`Recording setup error: ${error.message}`);
+                statusDiv.className = 'status error';
+                statusDiv.textContent = `❌ Recording setup failed: ${error.message}`;
+            }
+        }
+
+        function testVoice() {
+            const statusDiv = document.getElementById('voiceStatus');
+            statusDiv.className = 'status warning';
+            statusDiv.textContent = 'Testing voice synthesis...';
+            
+            if ('speechSynthesis' in window) {
+                const utterance = new SpeechSynthesisUtterance("This is a test of the voice synthesis system. If you can hear this clearly, the voice playback is working correctly.");
+                utterance.rate = 1.0;
+                utterance.volume = 0.9;
+                
+                utterance.onstart = () => {
+                    log('Voice synthesis started');
+                    statusDiv.className = 'status info';
+                    statusDiv.textContent = '🔊 Playing test audio...';
+                };
+                
+                utterance.onend = () => {
+                    log('Voice synthesis completed');
+                    statusDiv.className = 'status success';
+                    statusDiv.textContent = '✅ Voice synthesis working properly';
+                };
+                
+                utterance.onerror = (event) => {
+                    log(`Voice synthesis error: ${event.error}`);
+                    statusDiv.className = 'status error';
+                    statusDiv.textContent = `❌ Voice synthesis failed: ${event.error}`;
+                };
+                
+                speechSynthesis.speak(utterance);
+            } else {
+                log('Speech synthesis not supported in this browser');
+                statusDiv.className = 'status error';
+                statusDiv.textContent = '❌ Speech synthesis not supported';
+            }
+        }
+
+        function listVoices() {
+            const statusDiv = document.getElementById('voiceStatus');
+            
+            if ('speechSynthesis' in window) {
+                const voices = speechSynthesis.getVoices();
+                log(`Found ${voices.length} available voices:`);
+                
+                voices.forEach((voice, index) => {
+                    log(`${index + 1}. ${voice.name} (${voice.lang}) - default: ${voice.default}`);
+                });
+                
+                statusDiv.className = 'status info';
+                statusDiv.textContent = `Found ${voices.length} voices. Check console for details.`;
+            } else {
+                statusDiv.className = 'status error';
+                statusDiv.textContent = '❌ Speech synthesis not supported';
+            }
+        }
+
+        // Initialize
+        log('Test page loaded. Ready to test microphone and voice functionality.');
+    </script>
+</body>
+</html> 
