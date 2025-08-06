@@ -6,7 +6,4 @@ SpeechRecognition==3.10.0
 google-generativeai==0.3.0
 pymongo==4.5.0
 pydub==0.25.1
-redis==5.0.0
-gunicorn==21.2.0
 Werkzeug==2.3.7
-pyaudio==0.2.11
