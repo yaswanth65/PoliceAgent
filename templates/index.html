@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Police AI Receptionist</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚔 Police AI Receptionist</h1>
+            <p>Professional assistance for police-related inquiries</p>
+        </header>
+
+        <main>
+            <div id="status" class="status">Ready to help</div>
+            
+            <div class="recording-section">
+                <button id="recordBtn" class="record-btn" disabled>
+                    <span id="recordIcon">🎤</span>
+                    <span id="recordText">Click to Start Recording</span>
+                </button>
+                <div id="recordingTime" class="recording-time">00:00</div>
+            </div>
+
+            <div class="conversation" id="conversation">
+                <div class="welcome-message">
+                    <p><strong>Police Bot:</strong> Hello! I'm here to help with police-related inquiries, report filing, and public safety questions. How can I assist you today?</p>
+                </div>
+            </div>
+
+            <div class="caller-info" id="callerInfo" style="display: none;">
+                <h3>Caller Information</h3>
+                <input type="text" id="callerName" placeholder="Your Name" required>
+                <input type="email" id="callerEmail" placeholder="Your Email (optional)">
+                <button id="endCallBtn" class="end-call-btn">End Call & Save Summary</button>
+            </div>
+        </main>
+
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing your request...</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
